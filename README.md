@@ -1,14 +1,17 @@
-# ¿A qué paraderos mandar el bus de refuerzo?
+# Proyecto Final Matemáticas Discretas — Grupo 3
+## ¿A qué paraderos mandar el bus de refuerzo?
 ### Teoría de grafos y un perceptrón para aliviar la espera en la Carrera 51B
 
-**Curso:** Matemáticas Discretas (MAT 4021) · Universidad del Norte · Prof. MSc. Iván Gómez
-**Grupo:** César Berrio Remolina · Gabriela Campo Sandoval · Samuel Ortega Rodríguez
+**Curso:** Matemáticas Discretas (MAT 4021) · Universidad del Norte · Prof. MSc. Iván Gómez  
+**Grupo:** Grupo 3 — César Berrio Remolina · Gabriela Campo Sandoval · Samuel Ortega Rodríguez  
 **Lenguaje:** Python 3.10+ con NumPy y Matplotlib. Los algoritmos (BFS, Freeman y perceptrón) están escritos desde cero, sin librerías de grafos ni de *machine learning*.
 
 | Recurso | Enlace |
 |---|---|
 | Repositorio | https://github.com/Seor1601/despacho-inteligente-51b |
 | Aplicación web (versión estática, sin instalar nada) | https://estaciondecontrolmatematicasdiscretas.netlify.app/ |
+| Documento escrito (Informe) | [informe.pdf](informe.pdf) |
+| Diapositivas (Sustentación) | [presentacion.pdf](presentacion.pdf) |
 
 ---
 
