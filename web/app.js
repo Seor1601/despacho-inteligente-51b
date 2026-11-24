@@ -87,6 +87,82 @@ const ARISTAS_15_BASE = [
 
 const ARISTA_CIERRE_GRAN_VIA = [3, 6]; // Portoazul (P04) <-> UniNorte Puerta 4 (P07)
 
+// El backend Python (main.py) solo existe en ejecución local. En un hosting estático
+// (p. ej. Netlify) no se llama a /api/* y todo se calcula en el navegador con las
+// mismas fórmulas de motor_discreto.py.
+const BACKEND_LOCAL = ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
+
+function apiFetch(url, opciones) {
+  if (!BACKEND_LOCAL) return Promise.reject(new Error("Sin backend: calculo en el navegador"));
+  return fetch(url, opciones);
+}
+
+// ============================================================================
+// 1b. MOTOR DISCRETO EN EL CLIENTE (réplica de motor_discreto.py)
+// ============================================================================
+
+function construirAdyacencia(n, aristas) {
+  const A = Array.from({ length: n }, () => new Array(n).fill(0));
+  aristas.forEach(([u, v]) => { A[u][v] = 1; A[v][u] = 1; });
+  return A;
+}
+
+// BFS por capas desde cada fuente: distancias D[s][t] y número de geodésicas sigma[s][t]
+function bfsDistanciasYCaminos(A) {
+  const n = A.length;
+  const D = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+  const sigma = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let s = 0; s < n; s++) {
+    D[s][s] = 0;
+    sigma[s][s] = 1;
+    const cola = [s];
+    while (cola.length) {
+      const u = cola.shift();
+      for (let v = 0; v < n; v++) {
+        if (!A[u][v]) continue;
+        if (D[s][v] === Infinity) {
+          D[s][v] = D[s][u] + 1;
+          sigma[s][v] = sigma[s][u];
+          cola.push(v);
+        } else if (D[s][v] === D[s][u] + 1) {
+          sigma[s][v] += sigma[s][u];
+        }
+      }
+    }
+  }
+  return { D, sigma };
+}
+
+// Centralidades de Freeman: grado, cercanía e intermediación normalizada por C(n-1, 2).
+// sigma_st(v) = sigma_sv * sigma_vt si d(s,v) + d(v,t) = d(s,t)
+function centralidadesFreeman(A) {
+  const n = A.length;
+  const { D, sigma } = bfsDistanciasYCaminos(A);
+  const cd = A.map(fila => fila.reduce((a, b) => a + b, 0));
+  const sumD = D.map(fila => fila.reduce((a, b) => a + b, 0));
+  const cc = sumD.map(sd => (sd > 0 && isFinite(sd) ? (n - 1) / sd : 0));
+  const cb = new Array(n).fill(0);
+  for (let s = 0; s < n; s++) {
+    for (let t = s + 1; t < n; t++) {
+      if (!isFinite(D[s][t]) || D[s][t] === 0) continue;
+      for (let v = 0; v < n; v++) {
+        if (v === s || v === t) continue;
+        if (D[s][v] + D[v][t] === D[s][t]) cb[v] += (sigma[s][v] * sigma[v][t]) / sigma[s][t];
+      }
+    }
+  }
+  const pares = n > 2 ? ((n - 1) * (n - 2)) / 2 : 1;
+  return { D, sigma, cd, sumD, cc, cb, cbNorm: cb.map(x => x / pares) };
+}
+
+function centralidades15(esCierre) {
+  const aristas = esCierre
+    ? ARISTAS_15_BASE.filter(([u, v]) => !((u === ARISTA_CIERRE_GRAN_VIA[0] && v === ARISTA_CIERRE_GRAN_VIA[1]) ||
+                                          (u === ARISTA_CIERRE_GRAN_VIA[1] && v === ARISTA_CIERRE_GRAN_VIA[0])))
+    : ARISTAS_15_BASE;
+  return centralidadesFreeman(construirAdyacencia(PARADEROS_15.length, aristas));
+}
+
 // ============================================================================
 // 2. ESTADO GLOBAL DE LA APLICACIÓN
 // ============================================================================
@@ -138,7 +214,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 1. Cargar datos del backend (/api/data)
   try {
-    const res = await fetch("/api/data");
+    const res = await apiFetch("/api/data");
     if (res.ok) {
       appState.datosApi = await res.json();
       appState.apiConnected = true;
@@ -502,7 +578,7 @@ async function recalcularRed15(esCierre) {
   const hadOpenPopup = selIdx !== null && appState.mapMarkers[selIdx] && appState.mapMarkers[selIdx].isPopupOpen();
 
   try {
-    const res = await fetch(`/api/recalculate?cierre=${esCierre}`);
+    const res = await apiFetch(`/api/recalculate?cierre=${esCierre}`);
     if (res.ok) {
       appState.centralidades15Data = await res.json();
     }
@@ -554,27 +630,17 @@ function obtenerCentralidades15Actuales() {
     }
   }
 
-  // Fallback determinista canónico
-  const cb_normal = [0.000, 0.159, 0.022, 0.225, 0.016, 0.104, 0.489, 0.038, 0.537, 0.115, 0.293, 0.178, 0.077, 0.152, 0.000];
-  const cb_cierre = [0.000, 0.165, 0.090, 0.163, 0.240, 0.167, 0.377, 0.128, 0.537, 0.115, 0.293, 0.178, 0.077, 0.152, 0.000];
-  const cc_normal = [0.264, 0.359, 0.341, 0.412, 0.378, 0.400, 0.483, 0.438, 0.483, 0.400, 0.424, 0.378, 0.350, 0.311, 0.255];
-  const cd_base = [1, 2, 2, 3, 3, 2, 4, 3, 3, 2, 3, 2, 2, 2, 1];
-
-  const cb_act = esCierre ? cb_cierre : cb_normal;
-
+  // Sin backend: BFS + Freeman calculados aquí mismo sobre el grafo actual
+  // (con o sin la arista cerrada) y clasificación con la frontera aprendida.
+  const c = centralidades15(esCierre);
   return PARADEROS_15.map((p, i) => {
-    const cb = cb_act[i];
-    const cc = cc_normal[i];
-    const z = 0.20 * cb + 0.60 * p.afluencia - 0.50;
-    const y_hat = z >= 0 ? 1 : 0;
-    let deg = cd_base[i];
-    if (esCierre && (i === 3 || i === 6)) deg -= 1;
+    const z = 0.20 * c.cbNorm[i] + 0.60 * p.afluencia - 0.50;
     return {
       ...p,
-      cb_norm: cb,
-      cc: cc,
-      deg: deg,
-      y_hat: y_hat
+      cb_norm: c.cbNorm[i],
+      cc: c.cc[i],
+      deg: c.cd[i],
+      y_hat: z >= 0 ? 1 : 0
     };
   });
 }
@@ -1253,7 +1319,7 @@ async function ejecutarEntrenamientoPerceptron() {
   const w2_init = appState.w2;
 
   try {
-    const res = await fetch("/api/train-perceptron", {
+    const res = await apiFetch("/api/train-perceptron", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1733,74 +1799,124 @@ function renderizarTrazaPerceptron() {
 // 8. VISTA 4: SIMULACIÓN DE IMPACTO (DATOS REALES DE simular_impacto_despacho)
 // ============================================================================
 
+// Parámetros del modelo de flujo (idénticos a SIM_PARAMS en motor_discreto.py)
+const SIM_PARAMS = {
+  tasa_max_pax_h: 120.0,
+  buses_regulares_h: 4.0,
+  capacidad_bus: 40,
+  ocupacion_previa: 0.7,
+  r_min: 0.15,
+  r_max: 0.95,
+  fraccion_parada: 0.4,
+  headway_min: 15.0,
+  espera_extra_min: 35.0,
+  horas_simulacion: 10,
+  buses_refuerzo: 4
+};
+
+// Misma fórmula para todos los escenarios; solo cambia la asignación de refuerzos.
+function evaluarAsignacion(afluencias, seleccion, buses, capBus) {
+  const P = SIM_PARAMS;
+  const k = seleccion.reduce((a, b) => a + b, 0);
+  return afluencias.map((x2, i) => {
+    const demanda = x2 * P.tasa_max_pax_h;
+    const xOcup = i > 1 ? x2 : 0.2;
+    const r = Math.min(P.r_max, Math.max(P.r_min, 1.0 - P.ocupacion_previa * xOcup));
+    const cupo = P.buses_regulares_h * capBus * r * P.fraccion_parada;
+    const refuerzo = seleccion[i] && k > 0 ? (buses * capBus) / k : 0;
+    const rech = Math.max(0, demanda - (cupo + refuerzo));
+    const pct = demanda > 0 ? (rech / demanda) * 100.0 : 0.0;
+    return { demanda, pct, espera: P.headway_min + (pct / 100.0) * P.espera_extra_min };
+  });
+}
+
+function metricasAsignacion(afl, sel, buses, capBus, horas) {
+  const r = evaluarAsignacion(afl, sel, buses, capBus);
+  const n = r.length;
+  return {
+    espera: r.reduce((a, x) => a + x.espera, 0) / n,
+    rechazo: r.reduce((a, x) => a + x.pct, 0) / n,
+    rechazados: r.reduce((a, x) => a + (x.pct / 100) * x.demanda, 0) * horas
+  };
+}
+
+function topK(valores, k) {
+  const orden = valores.map((v, i) => i).sort((a, b) => (valores[b] - valores[a]) || (a - b)).slice(0, k);
+  return valores.map((_, i) => (orden.includes(i) ? 1 : 0));
+}
+
+function combinaciones(n, k) {
+  const out = [];
+  const rec = (inicio, actual) => {
+    if (actual.length === k) { out.push(actual.slice()); return; }
+    for (let i = inicio; i < n; i++) { actual.push(i); rec(i + 1, actual); actual.pop(); }
+  };
+  rec(0, []);
+  return out;
+}
+
+// Línea base justa: mismas sillas de refuerzo repartidas con reglas distintas
+function compararEstrategiasLocal(paraderos, buses, capBus, horas) {
+  const afl = paraderos.map(p => p.afluencia);
+  const cb = paraderos.map(p => p.cb_norm);
+  const modelo = paraderos.map(p => p.y_hat);
+  const n = paraderos.length;
+  const k = Math.max(1, modelo.reduce((a, b) => a + b, 0));
+  const codigos = sel => paraderos.filter((_, i) => sel[i]).map(p => p.codigo);
+  const filas = [
+    ["Sin refuerzo (actual)", new Array(n).fill(0)],
+    ["Perceptrón (modelo)", modelo],
+    [`Top-${k} por afluencia`, topK(afl, k)],
+    [`Top-${k} por intermediación C_B'`, topK(cb, k)],
+    ["Repartir entre los 15", new Array(n).fill(1)]
+  ].map(([nombre, sel]) => {
+    const m = metricasAsignacion(afl, sel, buses, capBus, horas);
+    return { estrategia: nombre, paraderos: codigos(sel), espera_media: m.espera, rechazo_medio: m.rechazo, pasajeros_rechazados: m.rechazados };
+  });
+  const combos = combinaciones(n, k);
+  const acc = { espera: 0, rechazo: 0, rechazados: 0 };
+  combos.forEach(c => {
+    const sel = new Array(n).fill(0);
+    c.forEach(i => { sel[i] = 1; });
+    const m = metricasAsignacion(afl, sel, buses, capBus, horas);
+    acc.espera += m.espera; acc.rechazo += m.rechazo; acc.rechazados += m.rechazados;
+  });
+  filas.push({
+    estrategia: `${k} paraderos al azar (promedio exacto)`,
+    paraderos: [`${combos.length} combinaciones`],
+    espera_media: acc.espera / combos.length,
+    rechazo_medio: acc.rechazo / combos.length,
+    pasajeros_rechazados: acc.rechazados / combos.length
+  });
+  return filas;
+}
+
 function calcularSimulacionLocal() {
   const paraderos = obtenerCentralidades15Actuales();
   const clasificaciones = paraderos.map(p => p.y_hat);
-  const horas_simulacion = 10;
-  const buses_refuerzo = 4;
-  const capacidad_bus = 40;
-  const capacidad_ofertada_estatica = 4.0 * capacidad_bus;
-
-  const nodosRefuerzo = clasificaciones.filter(y => y === 1).length;
-  const refuerzosPorNodo = nodosRefuerzo > 0 ? buses_refuerzo / nodosRefuerzo : 0;
-
-  let sumEsperaEst = 0;
-  let sumEsperaDyn = 0;
-  let sumRechazoEst = 0;
-  let sumRechazoDyn = 0;
-  let totalPasajerosHora = 0;
-  let totalRechEstHora = 0;
-  let totalRechDynHora = 0;
-  let horasAhorradas = 0;
-
-  const detalle = paraderos.map((p, i) => {
-    const llegada = p.afluencia * 120.0;
-    const cupoFactor = Math.min(0.95, Math.max(0.15, 1.0 - 0.7 * (i > 1 ? p.afluencia : 0.2)));
-    const capEst = capacidad_ofertada_estatica * cupoFactor * 0.4;
-
-    const rejEst = Math.max(0.0, llegada - capEst);
-    const pctRejEst = llegada > 0 ? (rejEst / llegada) * 100.0 : 0.0;
-    const espEst = 15.0 + (pctRejEst / 100.0) * 35.0;
-
-    const capDyn = clasificaciones[i] === 1
-      ? capEst + refuerzosPorNodo * capacidad_bus
-      : capEst * 1.35;
-    const rejDyn = Math.max(0.0, llegada - capDyn);
-    const pctRejDyn = llegada > 0 ? (rejDyn / llegada) * 100.0 : 0.0;
-    const espDyn = 10.0 + (pctRejDyn / 100.0) * 12.0;
-
-    sumEsperaEst += espEst;
-    sumEsperaDyn += espDyn;
-    sumRechazoEst += pctRejEst;
-    sumRechazoDyn += pctRejDyn;
-    totalPasajerosHora += llegada;
-    totalRechEstHora += (pctRejEst / 100.0) * llegada;
-    totalRechDynHora += (pctRejDyn / 100.0) * llegada;
-    horasAhorradas += ((espEst - espDyn) / 60.0) * llegada * horas_simulacion;
-
-    return {
-      codigo: p.codigo,
-      nombre: p.nombre,
-      clasificacion: clasificaciones[i],
-      tiempo_estatico: espEst,
-      tiempo_dinamico: espDyn,
-      rechazo_estatico: pctRejEst,
-      rechazo_dinamico: pctRejDyn
-    };
-  });
-
+  const horas = SIM_PARAMS.horas_simulacion;
+  const buses = SIM_PARAMS.buses_refuerzo;
+  const capBus = SIM_PARAMS.capacidad_bus;
+  const afl = paraderos.map(p => p.afluencia);
   const n = paraderos.length;
-  const meanEst = sumEsperaEst / n;
-  const meanDyn = sumEsperaDyn / n;
-  const meanRejEst = sumRechazoEst / n;
-  const meanRejDyn = sumRechazoDyn / n;
 
-  const totalRechEst = Math.floor(totalRechEstHora * horas_simulacion);
-  const totalRechDyn = Math.floor(totalRechDynHora * horas_simulacion);
+  const est = evaluarAsignacion(afl, new Array(n).fill(0), buses, capBus);
+  const din = evaluarAsignacion(afl, clasificaciones, buses, capBus);
+  const media = (arr, f) => arr.reduce((a, x) => a + f(x), 0) / arr.length;
+
+  const meanEst = media(est, x => x.espera);
+  const meanDyn = media(din, x => x.espera);
+  const meanRejEst = media(est, x => x.pct);
+  const meanRejDyn = media(din, x => x.pct);
+  const totalRechEst = Math.round(est.reduce((a, x) => a + (x.pct / 100) * x.demanda, 0) * horas);
+  const totalRechDyn = Math.round(din.reduce((a, x) => a + (x.pct / 100) * x.demanda, 0) * horas);
+  const horasAhorradas = est.reduce((a, x, i) => a + ((x.espera - din[i].espera) / 60) * x.demanda, 0) * horas;
 
   return {
-    horas_simulacion: horas_simulacion,
-    total_pasajeros_simulados: Math.floor(totalPasajerosHora * horas_simulacion),
+    horas_simulacion: horas,
+    buses_refuerzo: buses,
+    capacidad_bus: capBus,
+    total_pasajeros_simulados: Math.floor(est.reduce((a, x) => a + x.demanda, 0) * horas),
     total_rechazados_estatico: totalRechEst,
     total_rechazados_dinamico: totalRechDyn,
     pasajeros_salvados_sobrecupo: Math.max(0, totalRechEst - totalRechDyn),
@@ -1811,7 +1927,16 @@ function calcularSimulacionLocal() {
     rechazo_promedio_estatico: meanRejEst,
     rechazo_promedio_dinamico: meanRejDyn,
     reduccion_rechazo_pct: ((meanRejEst - meanRejDyn) / meanRejEst) * 100.0,
-    detalle_por_paradero: detalle
+    estrategias: compararEstrategiasLocal(paraderos, buses, capBus, horas),
+    detalle_por_paradero: paraderos.map((p, i) => ({
+      codigo: p.codigo,
+      nombre: p.nombre,
+      clasificacion: clasificaciones[i],
+      tiempo_estatico: est[i].espera,
+      tiempo_dinamico: din[i].espera,
+      rechazo_estatico: est[i].pct,
+      rechazo_dinamico: din[i].pct
+    }))
   };
 }
 
@@ -1822,7 +1947,7 @@ async function ejecutarSimulacionImpacto() {
 
   if (!sim) {
     try {
-      const res = await fetch("/api/simulate", {
+      const res = await apiFetch("/api/simulate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1848,7 +1973,31 @@ async function ejecutarSimulacionImpacto() {
   actualizarKpisImpacto(sim);
   renderizarGraficaImpacto(sim.detalle_por_paradero);
   renderizarTablaImpacto(sim.detalle_por_paradero);
+  renderizarTablaEstrategias(sim.estrategias || calcularSimulacionLocal().estrategias);
   actualizarResumenSidebar15();
+}
+
+// Tabla de líneas base: misma cantidad de buses de refuerzo, distinta regla de asignación
+function renderizarTablaEstrategias(estrategias) {
+  const tbody = document.getElementById("tbody-impact-baselines");
+  if (!tbody || !estrategias) return;
+  const base = estrategias[0];
+  tbody.innerHTML = "";
+  estrategias.forEach(e => {
+    const esModelo = e.estrategia.startsWith("Perceptr");
+    const evitados = base.pasajeros_rechazados - e.pasajeros_rechazados;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${esModelo ? `<strong>${e.estrategia}</strong>` : e.estrategia}</td>
+      <td>${e.paraderos.join(", ") || "—"}</td>
+      <td>${e.espera_media.toFixed(1)} min</td>
+      <td>${e.rechazo_medio.toFixed(1)}%</td>
+      <td>${Math.round(e.pasajeros_rechazados).toLocaleString("en-US")}</td>
+      <td>${evitados > 0.5 ? "−" + Math.round(evitados).toLocaleString("en-US") : "—"}</td>
+    `;
+    if (esModelo) tr.style.color = THEME.sageHi;
+    tbody.appendChild(tr);
+  });
 }
 
 function actualizarKpisImpacto(sim) {

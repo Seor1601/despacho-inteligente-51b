@@ -7,7 +7,7 @@ Módulo puro sin librerías de caja negra:
 - Búsqueda en Anchura (BFS) por capas con multiplicidad de caminos geodésicos.
 - Centralidades de Freeman (Grado C_D, Cercanía C_C, Intermediación C_B y Normalizada C_B').
 - Perceptrón de Rosenblatt (1958) con función escalón de Heaviside y traza determinista.
-- Modelo de Simulación Operativa de Despacho (Antes vs. Después).
+- Modelo de Simulación Operativa de Despacho (Antes vs. Después) con líneas base justas.
 - Topología dual: Subgrafo analítico de 6 nodos y Red completa de 15 paraderos reales.
 """
 
@@ -318,126 +318,177 @@ class PerceptronRosenblatt:
 
 
 # =============================================================================
-# 6. MODELO DE SIMULACIÓN DE IMPACTO (ANTES VS. DESPUÉS)
+# 6. MODELO DE SIMULACIÓN DE IMPACTO (ANTES VS. DESPUÉS) Y LÍNEAS BASE
 # =============================================================================
+#
+# Modelo de flujo horario por paradero (determinista, sin aleatoriedad).
+# Todos los escenarios usan EXACTAMENTE la misma fórmula; lo único que cambia
+# entre ellos es a qué paraderos se asignan los buses de refuerzo.
+#
+#   Demanda:            lambda_i = TASA_MAX_PAX_H * x2_i             [pasajeros/hora]
+#   Cupo regular libre: K_i = BUSES_H * CAP_BUS * r_i * F_PARADA      [sillas/hora]
+#       r_i = clip(1 - OCUP_PREVIA * x2_i, R_MIN, R_MAX)   fracción de sillas que
+#             llegan libres (los buses vienen ocupados desde paraderos previos);
+#             para los dos primeros paraderos (inicio de ruta) se usa x2 = 0.2.
+#       F_PARADA: fracción de los buses de la ruta que efectivamente se detiene.
+#   Refuerzo:           cada bus vacío aporta CAP_BUS sillas/hora al paradero
+#                       asignado (B buses repartidos por igual entre los elegidos).
+#   Rechazo:            p_i = max(0, lambda_i - (K_i + refuerzo_i)) / lambda_i
+#   Espera:             W_i = HEADWAY_MIN + p_i * ESPERA_EXTRA_MIN   [minutos]
+#                       (quien no cabe espera, en promedio, parte del siguiente ciclo)
+#
+# Los valores de los parámetros son SUPUESTOS del grupo (no medidos); se dejan
+# explícitos para que cualquiera pueda cambiarlos y repetir el experimento.
 
-def simular_impacto_despacho(paraderos, clasificaciones, horas_simulacion=10, buses_refuerzo=4, capacidad_bus=40):
+SIM_PARAMS = {
+    "tasa_max_pax_h": 120.0,     # pasajeros/hora en un paradero con afluencia 1.0
+    "buses_regulares_h": 4.0,    # frecuencia regular: 1 bus cada 15 min
+    "capacidad_bus": 40,         # sillas por bus
+    "ocupacion_previa": 0.7,     # cuánto se llena el bus antes de llegar, según x2
+    "r_min": 0.15,
+    "r_max": 0.95,
+    "fraccion_parada": 0.4,      # fracción de buses regulares que se detienen
+    "headway_min": 15.0,         # espera base = intervalo entre buses
+    "espera_extra_min": 35.0,    # espera adicional de un pasajero rechazado
+    "horas_simulacion": 10,
+    "buses_refuerzo": 4,
+}
+
+
+def _evaluar_asignacion(afluencias, seleccion, buses_refuerzo, capacidad_bus, params):
+    """Aplica el modelo de flujo a una asignación binaria de refuerzos.
+    Retorna vectores (demanda, rechazo %, espera min) por paradero."""
+    afl = np.asarray(afluencias, dtype=float)
+    n = len(afl)
+    demanda = afl * params["tasa_max_pax_h"]
+    x_ocup = np.array([afl[i] if i > 1 else 0.2 for i in range(n)])
+    r = np.clip(1.0 - params["ocupacion_previa"] * x_ocup, params["r_min"], params["r_max"])
+    cupo_regular = params["buses_regulares_h"] * capacidad_bus * r * params["fraccion_parada"]
+
+    sel = np.asarray(seleccion, dtype=int)
+    k = int(sel.sum())
+    refuerzo = sel * (buses_refuerzo * capacidad_bus / k) if k > 0 else np.zeros(n)
+
+    rechazados = np.maximum(0.0, demanda - (cupo_regular + refuerzo))
+    pct_rechazo = np.where(demanda > 0, rechazados / demanda * 100.0, 0.0)
+    espera = params["headway_min"] + (pct_rechazo / 100.0) * params["espera_extra_min"]
+    return demanda, pct_rechazo, espera
+
+
+def simular_impacto_despacho(paraderos, clasificaciones, horas_simulacion=10, buses_refuerzo=4,
+                             capacidad_bus=40, params=None):
     """
-    Simulador de colas de tráfico urbano que cuantifica las métricas exigidas por la rúbrica:
-    - Tiempo medio de espera en paradero (minutos).
-    - % de pasajeros rechazados por sobrecupo.
-    - Ocupación promedio de flota.
-    
-    Compara dos escenarios:
-    - Escenario Estático (Antes): Despacho tradicional de frecuencia fija (cada 15 min),
-      donde los buses llegan ya saturados a paraderos intermedios y de alta intermediación.
-    - Escenario Dinámico Guiado por IA Discreta (Después): Se inyectan buses de refuerzo
-      en vacío directamente en los paraderos donde el Perceptrón determinó y_hat = 1.
+    Compara el despacho actual (Antes: sin refuerzos) contra el despacho guiado por
+    el perceptrón (Después: los `buses_refuerzo` se reparten entre los paraderos con y=1).
+    Ambos escenarios usan la misma fórmula (ver encabezado de la sección 6).
     """
+    p = dict(SIM_PARAMS if params is None else params)
     n = len(paraderos)
-    np.random.seed(42)  # Semilla fija para reproducibilidad matemática
-    
-    # Parámetros de demanda por paradero (pasajeros/hora según afluencia)
-    tasa_llegada_base = np.array([p["afluencia"] * 120.0 for p in paraderos])  # 20 a 114 pax/h
-    
-    # 1. Escenario Estático: 4 buses/hora estándar en ruta secuencial
-    buses_estaticos_hora = 4.0
-    capacidad_ofertada_estatica = buses_estaticos_hora * capacidad_bus  # 160 pax/h distribuidos
-    
-    # En el corredor, los primeros paraderos van llenando los buses, dejando poco cupo libre
-    # acumulado para paraderos intermedios críticos (Portoazul, UniNorte, Makro, UniAtlántico)
-    cupo_remanente_factor = np.array([
-        1.0 - 0.7 * (p["afluencia"] if i > 1 else 0.2)
-        for i, p in enumerate(paraderos)
-    ])
-    cupo_remanente_factor = np.clip(cupo_remanente_factor, 0.15, 0.95)
-    
-    capacidad_efectiva_estatica = capacidad_ofertada_estatica * cupo_remanente_factor * 0.4
-    
-    pax_rechazados_est = []
-    tiempo_espera_est = []
-    
-    for i in range(n):
-        llegada = tasa_llegada_base[i]
-        cap = capacidad_efectiva_estatica[i]
-        
-        # Pasajeros que no caben en el primer bus y deben esperar el siguiente (o sufren sobrecupo)
-        rechazados = max(0.0, llegada - cap)
-        pct_rechazo = (rechazados / llegada) * 100.0 if llegada > 0 else 0.0
-        
-        # Tiempo de espera base = 15 min; con rechazo de 1 o 2 buses, escala a 30-50 min
-        espera = 15.0 + (pct_rechazo / 100.0) * 35.0
-        
-        pax_rechazados_est.append(pct_rechazo)
-        tiempo_espera_est.append(espera)
-        
-    # 2. Escenario Dinámico: Los paraderos con y=1 reciben refuerzo en vacío
-    # Cada refuerzo inyecta 40 sillas vacías directamente al paradero crítico
-    pax_rechazados_din = []
-    tiempo_espera_din = []
-    
-    # Repartir los buses de refuerzo disponibles equitativamente entre los nodos con y=1
-    nodos_refuerzo = [i for i, y in enumerate(clasificaciones) if y == 1]
-    refuerzos_por_nodo = (buses_refuerzo / max(1, len(nodos_refuerzo))) if len(nodos_refuerzo) > 0 else 0
-    
-    for i in range(n):
-        llegada = tasa_llegada_base[i]
-        cap = capacidad_efectiva_estatica[i]
-        
-        if clasificaciones[i] == 1:
-            cap_extra = refuerzos_por_nodo * capacidad_bus  # Inyección en vacío
-            cap_total = cap + cap_extra
-        else:
-            # Los nodos estándar se benefician indirectamente porque los buses regulares
-            # ya no se saturan en los nodos críticos
-            cap_total = cap * 1.35
-            
-        rechazados = max(0.0, llegada - cap_total)
-        pct_rechazo = (rechazados / llegada) * 100.0 if llegada > 0 else 0.0
-        espera = 10.0 + (pct_rechazo / 100.0) * 12.0
-        
-        pax_rechazados_din.append(pct_rechazo)
-        tiempo_espera_din.append(espera)
-        
-    pax_rechazados_est = np.array(pax_rechazados_est)
-    tiempo_espera_est = np.array(tiempo_espera_est)
-    pax_rechazados_din = np.array(pax_rechazados_din)
-    tiempo_espera_din = np.array(tiempo_espera_din)
-    
-    # Cuantificación agregada en la ventana horaria de simulación
-    total_pasajeros = int(np.sum(tasa_llegada_base) * horas_simulacion)
-    total_rechazo_est = int(np.sum((pax_rechazados_est / 100.0) * tasa_llegada_base) * horas_simulacion)
-    total_rechazo_din = int(np.sum((pax_rechazados_din / 100.0) * tasa_llegada_base) * horas_simulacion)
-    pasajeros_salvados = max(0, total_rechazo_est - total_rechazo_din)
-    horas_pasajero_ahorradas = float(np.sum(((tiempo_espera_est - tiempo_espera_din) / 60.0) * tasa_llegada_base) * horas_simulacion)
-    
-    resumen = {
+    afl = [q["afluencia"] for q in paraderos]
+
+    dem, rej_est, esp_est = _evaluar_asignacion(afl, [0] * n, buses_refuerzo, capacidad_bus, p)
+    _, rej_din, esp_din = _evaluar_asignacion(afl, clasificaciones, buses_refuerzo, capacidad_bus, p)
+
+    total_pasajeros = int(np.sum(dem) * horas_simulacion)
+    total_rechazo_est = int(round(np.sum(rej_est / 100.0 * dem) * horas_simulacion))
+    total_rechazo_din = int(round(np.sum(rej_din / 100.0 * dem) * horas_simulacion))
+    horas_ahorradas = float(np.sum((esp_est - esp_din) / 60.0 * dem) * horas_simulacion)
+
+    return {
         "horas_simulacion": int(horas_simulacion),
+        "buses_refuerzo": int(buses_refuerzo),
+        "capacidad_bus": int(capacidad_bus),
+        "parametros": p,
         "total_pasajeros_simulados": total_pasajeros,
         "total_rechazados_estatico": total_rechazo_est,
         "total_rechazados_dinamico": total_rechazo_din,
-        "pasajeros_salvados_sobrecupo": pasajeros_salvados,
-        "horas_pasajero_ahorradas": horas_pasajero_ahorradas,
-        "tiempo_espera_promedio_estatico": float(np.mean(tiempo_espera_est)),
-        "tiempo_espera_promedio_dinamico": float(np.mean(tiempo_espera_din)),
-        "reduccion_tiempo_espera_pct": float((np.mean(tiempo_espera_est) - np.mean(tiempo_espera_din)) / np.mean(tiempo_espera_est) * 100.0),
-        "rechazo_promedio_estatico": float(np.mean(pax_rechazados_est)),
-        "rechazo_promedio_dinamico": float(np.mean(pax_rechazados_din)),
-        "reduccion_rechazo_pct": float((np.mean(pax_rechazados_est) - np.mean(pax_rechazados_din)) / np.mean(pax_rechazados_est) * 100.0),
+        "pasajeros_salvados_sobrecupo": max(0, total_rechazo_est - total_rechazo_din),
+        "horas_pasajero_ahorradas": horas_ahorradas,
+        "tiempo_espera_promedio_estatico": float(np.mean(esp_est)),
+        "tiempo_espera_promedio_dinamico": float(np.mean(esp_din)),
+        "reduccion_tiempo_espera_pct": float((np.mean(esp_est) - np.mean(esp_din)) / np.mean(esp_est) * 100.0),
+        "rechazo_promedio_estatico": float(np.mean(rej_est)),
+        "rechazo_promedio_dinamico": float(np.mean(rej_din)),
+        "reduccion_rechazo_pct": float((np.mean(rej_est) - np.mean(rej_din)) / np.mean(rej_est) * 100.0),
         "detalle_por_paradero": [
             {
                 "codigo": paraderos[i]["codigo"],
                 "nombre": paraderos[i]["nombre"],
                 "clasificacion": int(clasificaciones[i]),
-                "tiempo_estatico": float(tiempo_espera_est[i]),
-                "tiempo_dinamico": float(tiempo_espera_din[i]),
-                "rechazo_estatico": float(pax_rechazados_est[i]),
-                "rechazo_dinamico": float(pax_rechazados_din[i])
+                "tiempo_estatico": float(esp_est[i]),
+                "tiempo_dinamico": float(esp_din[i]),
+                "rechazo_estatico": float(rej_est[i]),
+                "rechazo_dinamico": float(rej_din[i]),
             }
             for i in range(n)
-        ]
+        ],
     }
-    return resumen
+
+
+def _top_k(valores, k):
+    """Selecciona los k índices de mayor valor (desempate por menor índice)."""
+    orden = sorted(range(len(valores)), key=lambda i: (-valores[i], i))[:k]
+    return [1 if i in orden else 0 for i in range(len(valores))]
+
+
+def comparar_estrategias(paraderos, cb_norm, clasificaciones, horas_simulacion=10,
+                         buses_refuerzo=4, capacidad_bus=40, params=None):
+    """
+    Línea base justa: todas las estrategias reparten la MISMA cantidad de buses de
+    refuerzo con la MISMA fórmula. Así se separa el efecto de 'agregar buses' del
+    efecto de 'elegir bien dónde ponerlos'.
+
+    Estrategias:
+      - Sin refuerzo (situación actual).
+      - Perceptrón (paraderos con y_hat = 1).
+      - Top-k por afluencia (k = número de paraderos que eligió el perceptrón).
+      - Top-k por intermediación C_B'.
+      - Reparto uniforme entre los 15 paraderos.
+      - Al azar: valor esperado EXACTO sobre todas las combinaciones de k paraderos.
+    """
+    from itertools import combinations
+
+    p = dict(SIM_PARAMS if params is None else params)
+    n = len(paraderos)
+    afl = [q["afluencia"] for q in paraderos]
+    k = max(1, int(sum(clasificaciones)))
+
+    def metricas(sel):
+        dem, rej, esp = _evaluar_asignacion(afl, sel, buses_refuerzo, capacidad_bus, p)
+        return float(np.mean(esp)), float(np.mean(rej)), float(np.sum(rej / 100.0 * dem) * horas_simulacion)
+
+    estrategias = [
+        ("Sin refuerzo (actual)", [0] * n),
+        ("Perceptrón (modelo)", list(clasificaciones)),
+        (f"Top-{k} por afluencia", _top_k(afl, k)),
+        (f"Top-{k} por intermediación C_B'", _top_k(list(cb_norm), k)),
+        ("Repartir entre los 15", [1] * n),
+    ]
+    resultados = []
+    for nombre, sel in estrategias:
+        esp, rej, pax = metricas(sel)
+        resultados.append({
+            "estrategia": nombre,
+            "paraderos": [paraderos[i]["codigo"] for i in range(n) if sel[i]],
+            "espera_media": esp,
+            "rechazo_medio": rej,
+            "pasajeros_rechazados": pax,
+        })
+
+    combos = list(combinations(range(n), k))
+    acumulado = np.zeros(3)
+    for c in combos:
+        sel = [1 if i in c else 0 for i in range(n)]
+        acumulado += np.array(metricas(sel))
+    acumulado /= len(combos)
+    resultados.append({
+        "estrategia": f"{k} paraderos al azar (promedio exacto)",
+        "paraderos": [f"{len(combos)} combinaciones"],
+        "espera_media": float(acumulado[0]),
+        "rechazo_medio": float(acumulado[1]),
+        "pasajeros_rechazados": float(acumulado[2]),
+    })
+    return resultados
 
 
 # =============================================================================

@@ -26,7 +26,7 @@ from motor_discreto import (
     PARADEROS_6, A_6,
     PARADEROS_15, ARISTAS_15_BASE, ARISTA_CIERRE_GRAN_VIA, obtener_grafo_15,
     calcular_distancias_y_caminos_bfs, calcular_centralidades,
-    PerceptronRosenblatt, simular_impacto_despacho,
+    PerceptronRosenblatt, simular_impacto_despacho, comparar_estrategias,
     graficar_red_topologica, graficar_frontera_decision, graficar_red_15
 )
 
@@ -136,6 +136,7 @@ class AcademicAppHandler(NoCacheHTTPRequestHandler):
             preds_c = [p_base.predict(np.array([cb_norm_c[i], PARADEROS_15[i]["afluencia"]])) for i in range(15)]
 
             sim_n = simular_impacto_despacho(PARADEROS_15, preds_n, horas_simulacion=10, buses_refuerzo=4)
+            sim_n["estrategias"] = comparar_estrategias(PARADEROS_15, cb_norm_n, preds_n)
 
             payload = {
                 "paraderos_6": PARADEROS_6,
@@ -280,6 +281,8 @@ class AcademicAppHandler(NoCacheHTTPRequestHandler):
                 preds = [1 if (0.20 * cb_norm_15[i] + 0.60 * PARADEROS_15[i]["afluencia"] - 0.50 >= 0) else 0 for i in range(15)]
 
             sim = simular_impacto_despacho(PARADEROS_15, preds, horas_simulacion=horas, buses_refuerzo=buses, capacidad_bus=cap)
+            sim["estrategias"] = comparar_estrategias(PARADEROS_15, cb_norm_15, preds, horas_simulacion=horas,
+                                                      buses_refuerzo=buses, capacidad_bus=cap)
 
             body = json.dumps(sim, cls=NumpyEncoder).encode("utf-8")
             self.send_response(200)
@@ -446,8 +449,25 @@ def ejecutar_demostracion_15_nodos(perceptron):
     print(f"Tasa de Pasajeros Rechazados por Sobrecupo (Estático): {sim['rechazo_promedio_estatico']:.1f}%")
     print(f"Tasa de Pasajeros Rechazados por Sobrecupo (Dinámico): {sim['rechazo_promedio_dinamico']:.1f}%")
     print(f">> REDUCCIÓN EN TASA DE SOBRECUPO: {sim['reduccion_rechazo_pct']:.1f}%")
-    print(f">> PASAJEROS PROTEGIDOS DEL COLAPSO VIAL: +{sim['pasajeros_salvados_sobrecupo']:,} usuarios que lograron abordar")
+    print(f">> PASAJEROS ADICIONALES QUE LOGRAN ABORDAR: +{sim['pasajeros_salvados_sobrecupo']:,}")
+    print("Nota: 'Antes' y 'Después' usan la misma fórmula; solo cambia dónde se ponen los 4 buses de refuerzo.")
     print("-" * 102)
+
+    # Línea base justa: misma cantidad de buses, distintas reglas de asignación
+    print("\n--- 2.2. COMPARACIÓN CONTRA LÍNEAS BASE (MISMOS 4 BUSES, MISMA FÓRMULA) ---")
+    print(f"{'Estrategia':<42} {'Espera (min)':>13} {'Rechazo (%)':>12} {'Rechazados (10 h)':>18}   Paraderos")
+    print("-" * 110)
+    for e in comparar_estrategias(PARADEROS_15, cb_norm_n, preds_normal):
+        print(f"{e['estrategia']:<42} {e['espera_media']:>13.1f} {e['rechazo_medio']:>12.1f} "
+              f"{e['pasajeros_rechazados']:>18,.0f}   {', '.join(e['paraderos'])}")
+    print("-" * 110)
+
+    # Escenario de cierre: qué paraderos elegiría el perceptrón
+    preds_cierre = [perceptron.predict(np.array([cb_norm_c[i], PARADEROS_15[i]["afluencia"]])) for i in range(15)]
+    sel_cierre = [PARADEROS_15[i]["codigo"] for i in range(15) if preds_cierre[i] == 1]
+    print(f"\nCon cierre Portoazul–UniNorte P4 el perceptrón elige: {', '.join(sel_cierre)}")
+    z_sj = 0.2 * cb_norm_c[4] + 0.6 * PARADEROS_15[4]["afluencia"] - 0.5
+    print(f"Colegio San José (P05): C_B' {cb_norm_n[4]:.3f} -> {cb_norm_c[4]:.3f}, z = {z_sj:+.3f} (queda bajo la frontera)")
 
 
 def iniciar_servidor_web(puerto=8080):
@@ -501,6 +521,9 @@ def main():
     ejecutar_demostracion_15_nodos(perceptron)
     
     # 3. Iniciar el servidor web local y abrir el navegador en localhost:8080
+    #    (python main.py --sin-web ejecuta solo la parte de consola)
+    if "--sin-web" in sys.argv:
+        return
     iniciar_servidor_web(puerto=8080)
 
 

@@ -123,8 +123,8 @@
           </div>
           <div class="telemetry-tile">
             <span class="telemetry-label">Reducción de Espera</span>
-            <strong class="telemetry-value brass" id="menu-tel-savings">28.8 → 12.4 min (-56.8%)</strong>
-            <span class="telemetry-detail" id="menu-tel-saved-pax">+2,526 usuarios abordaron sin rechazo</span>
+            <strong class="telemetry-value brass" id="menu-tel-savings">28.8 → 25.2 min (-12.4%)</strong>
+            <span class="telemetry-detail" id="menu-tel-saved-pax">+1,600 usuarios abordaron sin rechazo</span>
           </div>
         </div>
 
@@ -200,7 +200,7 @@
               <div class="menu-card-copy">
                 <h2 class="menu-card-title">Simulación de Impacto — Antes vs. Después</h2>
                 <p class="menu-card-desc">
-                  Comparativa entre frecuencia estática y despacho guiado por IA discreta: espera en andén y tasa de sobrecupo.
+                  Comparativa entre frecuencia estática y despacho guiado por el perceptrón, contra líneas base con los mismos buses.
                 </p>
               </div>
               <div class="menu-card-footer">Abrir evaluación operativa</div>
@@ -249,7 +249,7 @@
             </div>
             <div class="kpi-mini-box">
               <div class="kpi-mini-title">Espera Media</div>
-              <div class="kpi-mini-value" id="kpi-avg-wait">12.4 min</div>
+              <div class="kpi-mini-value" id="kpi-avg-wait">25.2 min</div>
             </div>
           </div>
         </div>
@@ -678,9 +678,9 @@
             <div class="kpi-values-flow">
               <span class="kpi-before-dark" id="metric-wait-est">28.8 min</span>
               <span class="kpi-arrow">→</span>
-              <span class="kpi-after-dark" id="metric-wait-dyn">12.4 min</span>
+              <span class="kpi-after-dark" id="metric-wait-dyn">25.2 min</span>
             </div>
-            <div class="kpi-pill-delta" id="metric-wait-pct">▼ Reducción del 56.8%</div>
+            <div class="kpi-pill-delta" id="metric-wait-pct">▼ Reducción del 12.4%</div>
           </div>
 
           <div class="kpi-box-dark">
@@ -688,9 +688,9 @@
             <div class="kpi-values-flow">
               <span class="kpi-before-dark" id="metric-reject-est">39.4%</span>
               <span class="kpi-arrow">→</span>
-              <span class="kpi-after-dark" id="metric-reject-dyn">20.3%</span>
+              <span class="kpi-after-dark" id="metric-reject-dyn">29.2%</span>
             </div>
-            <div class="kpi-pill-delta" id="metric-reject-pct">▼ Reducción del 48.6%</div>
+            <div class="kpi-pill-delta" id="metric-reject-pct">▼ Reducción del 25.9%</div>
           </div>
 
           <div class="kpi-box-dark">
@@ -698,15 +698,15 @@
             <div class="kpi-values-flow">
               <span class="kpi-before-dark" id="metric-pax-rej-est">5,216</span>
               <span class="kpi-arrow">→</span>
-              <span class="kpi-after-dark" id="metric-pax-rej-dyn">2,690</span>
+              <span class="kpi-after-dark" id="metric-pax-rej-dyn">3,616</span>
             </div>
-            <div class="kpi-pill-delta" id="metric-pax-saved">+2,526 usuarios abordaron</div>
+            <div class="kpi-pill-delta" id="metric-pax-saved">+1,600 usuarios abordaron</div>
           </div>
 
           <div class="kpi-box-dark">
             <div class="kpi-title-text">Horas-Pasajero Ahorradas</div>
             <div class="kpi-values-flow">
-              <span class="kpi-after-dark brass" id="metric-hours-saved">3,394.5 h-pax</span>
+              <span class="kpi-after-dark brass" id="metric-hours-saved">933.3 h-pax</span>
             </div>
             <div class="kpi-pill-delta neutral" id="metric-total-pax">10,680 pasajeros simulados</div>
           </div>
@@ -727,6 +727,34 @@
           </div>
           <div class="impact-chart-wrap">
             <canvas id="chart-impact-bars"></canvas>
+          </div>
+        </div>
+
+        <!-- Línea base justa: mismos buses, misma fórmula, distinta regla -->
+        <div class="impact-card-dark">
+          <h3 class="impact-card-title spaced">
+            Comparación contra líneas base (mismos 4 buses de refuerzo, misma fórmula)
+          </h3>
+          <div class="impact-card-sub">
+            Todas las filas usan el mismo modelo de flujo; solo cambia a qué paraderos se envían los buses.
+            Así se separa el efecto de "agregar buses" del efecto de "elegir bien dónde ponerlos".
+          </div>
+          <div class="table-scroll-x">
+            <table class="table-dark" id="table-impact-baselines">
+              <thead>
+                <tr>
+                  <th>Estrategia</th>
+                  <th>Paraderos reforzados</th>
+                  <th>Espera media</th>
+                  <th>Rechazo medio</th>
+                  <th>Rechazados (10 h)</th>
+                  <th>vs. sin refuerzo</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-impact-baselines">
+                <!-- Inyectado dinámicamente -->
+              </tbody>
+            </table>
           </div>
         </div>
 
