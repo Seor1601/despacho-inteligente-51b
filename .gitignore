@@ -7,10 +7,13 @@ tectonic_bin/
 .DS_Store
 Thumbs.db
 
-# Documentos, diapositivas y salidas generadas fuera del programa
+# Fuentes de LaTeX y temporales
 *.tex
-*.pdf
 diapositivas_guion.md
 app.py
 grafo_red_51b.png
 frontera_decision_perceptron.png
+build_figma_deck.js
+FIGMA_DESIGN_SYSTEM_RULES.md
+web/presentacion_tactica.html
+web/slides_svg/
